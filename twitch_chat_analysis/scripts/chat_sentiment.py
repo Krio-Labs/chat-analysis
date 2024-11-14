@@ -3,7 +3,7 @@ from transformers import pipeline
 import torch
 import platform
 import logging
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import numpy as np
 import psutil
 from functools import partial
@@ -13,26 +13,42 @@ from multiprocessing import Pool, cpu_count
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def setup_models():
-    """Initialize models with appropriate device settings."""
-    device = "mps" if torch.backends.mps.is_available() and platform.system() == "Darwin" else (0 if torch.cuda.is_available() else -1)
+    """Initialize models with optimized settings."""
+    if torch.cuda.is_available():
+        device = 0
+        torch.backends.cudnn.benchmark = True  # Enable cudnn autotuner
+    elif torch.backends.mps.is_available() and platform.system() == "Darwin":
+        device = "mps"
+    else:
+        device = -1
     
-    emotion_classifier = pipeline('text-classification', 
-                                model="SamLowe/roberta-base-go_emotions", 
-                                device=device,
-                                truncation=True,
-                                max_length=128,
-                                top_k=None)  # Ensure we get all emotion probabilities
+    # Load model once and share across processes
+    emotion_classifier = pipeline(
+        'text-classification', 
+        model="SamLowe/roberta-base-go_emotions",
+        device=device,
+        truncation=True,
+        max_length=128,
+        top_k=None,
+        batch_size=32
+    )
     
     return emotion_classifier
 
 def process_chunk(messages, device_id=-1):
-    """Process a chunk of messages for emotion analysis."""
+    """Process a chunk of messages with optimized batch size"""
+    # Calculate optimal batch size based on available memory
+    mem = psutil.virtual_memory()
+    available_mem = mem.available / (1024 * 1024 * 1024)  # Convert to GB
+    optimal_batch_size = min(256 if available_mem > 16 else 128, len(messages))
+    
     emotion_classifier = pipeline(
         'text-classification', 
         model="SamLowe/roberta-base-go_emotions",
         device=device_id,
         truncation=True,
         max_length=128,
+        batch_size=optimal_batch_size,  # Use dynamic batch size
         top_k=None
     )
     
@@ -46,12 +62,12 @@ def process_chunk(messages, device_id=-1):
         'neutral': ['neutral', 'realization']
     }
     
-    results = []
-    for message in messages:
-        try:
-            # Get emotion classification with all probabilities
-            emotion_output = emotion_classifier(message)
-            
+    try:
+        # Process entire batch at once instead of one message at a time
+        emotion_outputs = emotion_classifier(messages, batch_size=32)
+        
+        results = []
+        for message, emotion_output in zip(messages, emotion_outputs):
             # Create a dictionary with message and initial scores for all emotions
             result = {
                 'message': message,
@@ -65,7 +81,7 @@ def process_chunk(messages, device_id=-1):
             }
             
             # Update emotion scores from model output
-            for item in emotion_output[0]:
+            for item in emotion_output:
                 result[item['label']] = float(item['score'])
             
             # Calculate cluster scores
@@ -101,21 +117,13 @@ def process_chunk(messages, device_id=-1):
             
             results.append(result)
             
-        except Exception as e:
-            logging.error(f"Error processing message: {message}")
-            logging.error(str(e))
-            results.append({
-                'message': message,
-                'sentiment_score': None,
-                'excitement': None,
-                'funny': None,
-                'happiness': None,
-                'anger': None,
-                'sadness': None,
-                'neutral': None
-            })
-    
-    return results
+        return results
+        
+    except Exception as e:
+        logging.error(f"Error processing batch: {str(e)}")
+        return [{'message': m, 'sentiment_score': None, 'excitement': None, 
+                'funny': None, 'happiness': None, 'anger': None, 
+                'sadness': None, 'neutral': None} for m in messages]
 
 def clean_up_workers():
     """Kill any remaining worker processes and cleanup resources."""
@@ -144,52 +152,42 @@ def clean_up_workers():
 
 def main():
     try:
-        # Set up logging with more detail
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format='%(asctime)s - %(levelname)s - %(message)s'
-        )
-        
-        # Load preprocessed messages
-        preprocessed_file_path = 'twitch_chat_analysis/outputs/twitch_chat_preprocessed.csv'
-        df_preprocessed = pd.read_csv(preprocessed_file_path)
-        
-        # Process messages in parallel
-        messages = df_preprocessed['message'].values
-        available_cpus = psutil.cpu_count(logical=True)
-        physical_cpus = psutil.cpu_count(logical=False)
-        num_cpus = max(1, min(physical_cpus, int(available_cpus * 0.8)))
-        batch_size = 32
-        
-        message_batches = np.array_split(messages, len(messages) // batch_size + 1)
-        all_results = []
-        
-        with ProcessPoolExecutor(max_workers=num_cpus) as executor:
-            try:
-                process_fn = partial(process_chunk, device_id=-1)
-                for i, batch_results in enumerate(executor.map(process_fn, message_batches)):
-                    all_results.extend(batch_results)
-                    logging.info(f"Processed batch {i + 1}/{len(message_batches)}")
-            except Exception as e:
-                logging.error(f"Error processing batches: {str(e)}")
-                raise e
+        # Load data in chunks to reduce memory usage
+        chunk_size = 10000
+        for chunk in pd.read_csv('twitch_chat_analysis/outputs/twitch_chat_preprocessed.csv', 
+                               chunksize=chunk_size):
+            
+            messages = chunk['message'].values
+            
+            # Optimize batch size based on available memory
+            mem = psutil.virtual_memory()
+            available_mem = mem.available / (1024 * 1024 * 1024)  # Convert to GB
+            batch_size = min(256 if available_mem > 16 else 128, len(messages))
+            
+            # Create larger batches for processing
+            message_batches = np.array_split(messages, max(1, len(messages) // batch_size))
+            
+            # Use ThreadPoolExecutor instead of ProcessPoolExecutor for GPU workloads
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                process_fn = partial(process_chunk, device_id=0 if torch.cuda.is_available() else -1)
+                results = list(executor.map(process_fn, message_batches))
         
         # Create DataFrame from results and ensure it has the same length as input
-        output_df = pd.DataFrame(all_results)
+        output_df = pd.DataFrame(results)
         
         if not output_df.empty:
             # Ensure we have the same number of rows as input
-            if len(output_df) != len(df_preprocessed):
-                logging.error(f"Mismatch in results length: got {len(output_df)}, expected {len(df_preprocessed)}")
+            if len(output_df) != len(chunk):
+                logging.error(f"Mismatch in results length: got {len(output_df)}, expected {len(chunk)}")
                 return
                 
             # Add index for merging
             output_df.index = range(len(output_df))
-            df_preprocessed.index = range(len(df_preprocessed))
+            chunk.index = range(len(chunk))
             
             # Merge the dataframes on index
             final_df = pd.concat([
-                df_preprocessed[['time', 'username', 'message']],
+                chunk[['time', 'username', 'message']],
                 output_df.drop('message', axis=1)
             ], axis=1)
             

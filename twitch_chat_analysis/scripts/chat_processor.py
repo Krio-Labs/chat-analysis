@@ -4,6 +4,9 @@ import pandas as pd
 from datetime import timedelta
 from pathlib import Path
 
+# Import the dictionary creation script
+from dictionary import chat_dictionary  # Adjust the import based on your actual function
+
 # Directory and file setup
 script_dir = Path(__file__).parent.parent
 data_dir = script_dir / 'data'
@@ -12,6 +15,12 @@ outputs_dir = script_dir / 'outputs'
 
 # Make sure outputs directory exists
 os.makedirs(outputs_dir, exist_ok=True)
+
+# Run the dictionary creation
+try:
+    chat_dictionary.create_dictionaries()  # Call the function that creates the dictionaries
+except Exception as e:
+    print(f"Error running dictionary creation: {e}")
 
 # File paths
 raw_data_file = data_dir / 'twitch_chat_raw.csv'
