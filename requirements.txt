@@ -1,0 +1,24 @@
+# Data processing and analysis
+pandas
+numpy
+
+# Machine Learning and NLP
+transformers
+torch
+vaderSentiment
+nltk
+
+# Visualization
+matplotlib
+seaborn
+
+# Progress and Performance
+tqdm
+psutil
+
+# Chat downloading
+chat-downloader
+
+# Emoji handling
+emoji==0.6.0
+

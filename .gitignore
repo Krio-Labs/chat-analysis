@@ -1,0 +1,45 @@
+# Configuration and sensitive information
+config.py
+
+# Python-related files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+my_env/
+venv/
+env/
+.env
+
+# IDE-specific files
+.vscode/
+.idea/
+
+# Operating system files
+.DS_Store
+Thumbs.db
+
+# Project-specific data and output files
+twitch_chat_analysis/data/
+twitch_chat_analysis/outputs/
+*.csv
+*.log
+
+# Specific log files
+twitch_chat_downloader.log
+twitch_analysis.log
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Temporary and backup files
+*.bak
+*.swp
+*.swo
+*~
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
