@@ -26,6 +26,11 @@ twitch_chat_analysis/outputs/
 *.csv
 *.log
 
+# Exception for dictionary files
+!dictionary_emotes.csv
+!dictionary_phrases.csv
+!dictionary_words.csv
+
 # Specific log files
 twitch_chat_downloader.log
 twitch_analysis.log

@@ -1,119 +1,84 @@
 import pandas as pd
-from transformers import pipeline
-import torch
-import platform
 import logging
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import psutil
 from functools import partial
-from multiprocessing import Pool, cpu_count
+import pickle
+from sklearn.feature_extraction.text import TfidfVectorizer
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def setup_models():
-    """Initialize models with optimized settings."""
-    if torch.cuda.is_available():
-        device = 0
-        torch.backends.cudnn.benchmark = True  # Enable cudnn autotuner
-    elif torch.backends.mps.is_available() and platform.system() == "Darwin":
-        device = "mps"
-    else:
-        device = -1
-    
-    # Load model once and share across processes
-    emotion_classifier = pipeline(
-        'text-classification', 
-        model="SamLowe/roberta-base-go_emotions",
-        device=device,
-        truncation=True,
-        max_length=128,
-        top_k=None,
-        batch_size=32
-    )
-    
-    return emotion_classifier
+# Define emotion clusters mapping
+emotion_clusters = {
+    'excitement': ['Excitement'],
+    'funny': ['Humor'],
+    'happiness': ['Joy'],
+    'anger': ['Anger'],
+    'sadness': ['Sadness'],
+    'neutral': ['Neutral']
+}
 
-def process_chunk(messages, device_id=-1):
-    """Process a chunk of messages with optimized batch size"""
-    # Calculate optimal batch size based on available memory
-    mem = psutil.virtual_memory()
-    available_mem = mem.available / (1024 * 1024 * 1024)  # Convert to GB
-    optimal_batch_size = min(256 if available_mem > 16 else 128, len(messages))
-    
-    emotion_classifier = pipeline(
-        'text-classification', 
-        model="SamLowe/roberta-base-go_emotions",
-        device=device_id,
-        truncation=True,
-        max_length=128,
-        batch_size=optimal_batch_size,  # Use dynamic batch size
-        top_k=None
-    )
-    
-    # Define emotion clusters
-    emotion_clusters = {
-        'excitement': ['admiration', 'excitement', 'curiosity', 'surprise', 'desire', 'pride', 'optimism'],
-        'funny': ['amusement', 'confusion', 'embarrassment', 'relief', 'surprise'],
-        'happiness': ['joy', 'gratitude', 'approval', 'love', 'caring', 'relief', 'optimism'],
-        'anger': ['anger', 'annoyance', 'disapproval', 'disgust', 'embarrassment', 'remorse'],
-        'sadness': ['sadness', 'disappointment', 'grief', 'remorse', 'fear', 'nervousness'],
-        'neutral': ['neutral', 'realization']
-    }
+def load_models():
+    """Load both emotion and highlight classifier models."""
+    try:
+        with open('twitch_chat_analysis/models/emotion/emotion_classifier_pipe_lr.pkl', 'rb') as f:
+            emotion_model = pickle.load(f)
+        with open('twitch_chat_analysis/models/highlightable/highlight_classifier_pipe_lr.pkl', 'rb') as f:
+            highlight_model = pickle.load(f)
+        return emotion_model, highlight_model
+    except Exception as e:
+        logging.error(f"Error loading models: {str(e)}")
+        raise
+
+def process_chunk(messages, models=None):
+    """Process a chunk of messages using both classifiers"""
+    if models is None:
+        models = load_models()
+    emotion_model, highlight_model = models
     
     try:
-        # Process entire batch at once instead of one message at a time
-        emotion_outputs = emotion_classifier(messages, batch_size=32)
+        # Get predictions from both models
+        emotion_predictions = emotion_model.predict(messages)
+        emotion_probabilities = emotion_model.predict_proba(messages)
+        highlight_scores = highlight_model.predict(messages)
         
         results = []
-        for message, emotion_output in zip(messages, emotion_outputs):
-            # Create a dictionary with message and initial scores for all emotions
+        for message, prediction, probs, highlight_score in zip(
+            messages, emotion_predictions, emotion_probabilities, highlight_scores
+        ):
+            # Create base result dictionary with highlight score
             result = {
                 'message': message,
-                'admiration': 0, 'amusement': 0, 'anger': 0, 'annoyance': 0,
-                'approval': 0, 'caring': 0, 'confusion': 0, 'curiosity': 0,
-                'desire': 0, 'disappointment': 0, 'disapproval': 0, 'disgust': 0,
-                'embarrassment': 0, 'excitement': 0, 'fear': 0, 'gratitude': 0,
-                'grief': 0, 'joy': 0, 'love': 0, 'nervousness': 0,
-                'optimism': 0, 'pride': 0, 'realization': 0, 'relief': 0,
-                'remorse': 0, 'sadness': 0, 'surprise': 0, 'neutral': 0
+                'sentiment_score': 0.0,
+                'highlight_score': float(highlight_score),  # Add highlight score
+                'excitement': 0.0,
+                'funny': 0.0,
+                'happiness': 0.0,
+                'anger': 0.0,
+                'sadness': 0.0,
+                'neutral': 0.0
             }
             
-            # Update emotion scores from model output
-            for item in emotion_output:
-                result[item['label']] = float(item['score'])
+            # Get the probability for each emotion class
+            emotion_probs = dict(zip(emotion_model.classes_, probs))
             
             # Calculate cluster scores
-            cluster_scores = {}
             for cluster_name, emotions in emotion_clusters.items():
-                # Handle emotions that appear in multiple clusters by taking their maximum contribution
-                cluster_score = sum(result[emotion] for emotion in emotions)
-                # Normalize by number of emotions in cluster to get average
-                cluster_scores[cluster_name] = round(cluster_score / len(emotions), 3)
+                cluster_score = sum(emotion_probs.get(emotion, 0.0) for emotion in emotions)
+                result[cluster_name] = round(cluster_score, 3)
             
-            # Calculate sentiment score (using original positive/negative emotions)
-            pos_emotions = ['admiration', 'amusement', 'approval', 'gratitude', 
-                          'joy', 'love', 'optimism', 'pride', 'relief']
-            neg_emotions = ['anger', 'annoyance', 'disappointment', 'disapproval', 
-                          'disgust', 'embarrassment', 'fear', 'grief', 
-                          'nervousness', 'remorse', 'sadness']
+            # Calculate sentiment score
+            pos_emotions = ['Excitement', 'Joy', 'Humor']
+            neg_emotions = ['Anger', 'Sadness']
             
-            pos_score = sum(result[emotion] for emotion in pos_emotions)
-            neg_score = sum(result[emotion] for emotion in neg_emotions)
+            pos_score = sum(emotion_probs.get(emotion, 0.0) for emotion in pos_emotions)
+            neg_score = sum(emotion_probs.get(emotion, 0.0) for emotion in neg_emotions)
             
             sentiment_score = pos_score - neg_score
-            if sentiment_score > 1.0:
-                sentiment_score = 1.0
-            if sentiment_score < -1.0:
-                sentiment_score = -1.0
-            
-            # Add sentiment score and cluster scores to result
-            result = {
-                'message': message,
-                'sentiment_score': round(sentiment_score, 3),
-                **cluster_scores  # Add all cluster scores
-            }
+            sentiment_score = max(-1.0, min(1.0, sentiment_score))  # Clamp between -1 and 1
+            result['sentiment_score'] = round(sentiment_score, 3)
             
             results.append(result)
             
@@ -121,95 +86,79 @@ def process_chunk(messages, device_id=-1):
         
     except Exception as e:
         logging.error(f"Error processing batch: {str(e)}")
-        return [{'message': m, 'sentiment_score': None, 'excitement': None, 
-                'funny': None, 'happiness': None, 'anger': None, 
-                'sadness': None, 'neutral': None} for m in messages]
-
-def clean_up_workers():
-    """Kill any remaining worker processes and cleanup resources."""
-    try:
-        # Kill child processes
-        current_process = psutil.Process()
-        children = current_process.children(recursive=True)
-        for child in children:
-            try:
-                child.kill()
-            except psutil.NoSuchProcess:
-                pass
-
-        # Clean up multiprocessing resources - Python 3.12 compatible
-        import multiprocessing.resource_tracker
-        try:
-            # Get the resource tracker singleton
-            tracker = multiprocessing.resource_tracker._resource_tracker
-            if tracker is not None:
-                tracker.clear()
-        except Exception as e:
-            logging.debug(f"Resource tracker cleanup skipped: {str(e)}")
-
-    except Exception as e:
-        logging.error(f"Error during cleanup: {str(e)}")
+        return [{'message': m, 'sentiment_score': None, 'highlight_score': None,
+                'excitement': None, 'funny': None, 'happiness': None, 
+                'anger': None, 'sadness': None, 'neutral': None} for m in messages]
 
 def main():
     try:
+        # Load both models once
+        models = load_models()
+        
+        # Initialize an empty DataFrame to store all results
+        all_final_df = pd.DataFrame()
+        
         # Load data in chunks to reduce memory usage
         chunk_size = 10000
-        for chunk in pd.read_csv('twitch_chat_analysis/outputs/twitch_chat_preprocessed.csv', 
-                               chunksize=chunk_size):
+        for chunk_num, chunk in enumerate(pd.read_csv('twitch_chat_analysis/data/twitch_chat_preprocessed.csv', 
+                                                    chunksize=chunk_size)):
             
+            logging.info(f"Processing chunk {chunk_num + 1}")
             messages = chunk['message'].values
             
-            # Optimize batch size based on available memory
+            # Calculate optimal batch size based on available memory
             mem = psutil.virtual_memory()
             available_mem = mem.available / (1024 * 1024 * 1024)  # Convert to GB
             batch_size = min(256 if available_mem > 16 else 128, len(messages))
             
-            # Create larger batches for processing
+            # Create batches for processing
             message_batches = np.array_split(messages, max(1, len(messages) // batch_size))
             
-            # Use ThreadPoolExecutor instead of ProcessPoolExecutor for GPU workloads
+            # Process batches using ThreadPoolExecutor
             with ThreadPoolExecutor(max_workers=4) as executor:
-                process_fn = partial(process_chunk, device_id=0 if torch.cuda.is_available() else -1)
+                process_fn = partial(process_chunk, models=models)
                 results = list(executor.map(process_fn, message_batches))
-        
-        # Create DataFrame from results and ensure it has the same length as input
-        output_df = pd.DataFrame(results)
-        
-        if not output_df.empty:
-            # Ensure we have the same number of rows as input
-            if len(output_df) != len(chunk):
-                logging.error(f"Mismatch in results length: got {len(output_df)}, expected {len(chunk)}")
-                return
+            
+            # Flatten results
+            all_results = [item for batch_result in results for item in batch_result]
+            
+            # Create DataFrame from results
+            output_df = pd.DataFrame(all_results)
+            
+            if not output_df.empty:
+                # Add index for merging
+                output_df.index = range(len(output_df))
+                chunk.index = range(len(chunk))
                 
-            # Add index for merging
-            output_df.index = range(len(output_df))
-            chunk.index = range(len(chunk))
-            
-            # Merge the dataframes on index
-            final_df = pd.concat([
-                chunk[['time', 'username', 'message']],
-                output_df.drop('message', axis=1)
-            ], axis=1)
-            
-            # Round scores for better readability
-            score_columns = [col for col in final_df.columns 
-                           if col not in ['time', 'username', 'message']]
-            final_df[score_columns] = final_df[score_columns].round(3)
-            
-            # Save results
-            output_file = 'twitch_chat_analysis/outputs/twitch_chat_sentiment_emotion_analysis.csv'
-            final_df.to_csv(output_file, index=False)
-            logging.info(f"Analysis completed. Results saved to {output_file}")
+                # Merge the dataframes
+                chunk_final_df = pd.concat([
+                    chunk[['time', 'username', 'message']],
+                    output_df.drop('message', axis=1)
+                ], axis=1)
+                
+                # Round scores
+                score_columns = [col for col in chunk_final_df.columns 
+                               if col not in ['time', 'username', 'message']]
+                chunk_final_df[score_columns] = chunk_final_df[score_columns].round(3)
+                
+                # Append to main DataFrame
+                all_final_df = pd.concat([all_final_df, chunk_final_df], ignore_index=True)
+                
+                logging.info(f"Processed {len(all_final_df)} messages so far")
+            else:
+                logging.error(f"No results were generated for chunk {chunk_num + 1}")
+        
+        if not all_final_df.empty:
+            # Save complete results
+            output_file = 'twitch_chat_analysis/data/twitch_chat_sentiment_emotion_analysis.csv'
+            all_final_df.to_csv(output_file, index=False)
+            logging.info(f"Analysis completed. Total messages processed: {len(all_final_df)}")
+            logging.info(f"Results saved to {output_file}")
         else:
             logging.error("No results were generated from the analysis")
             
     except Exception as e:
         logging.error(f"Error in main: {str(e)}")
-    finally:
-        clean_up_workers()
 
 if __name__ == '__main__':
-    try:
-        main()
-    finally:
-        clean_up_workers()  # Ensure cleanup happens even on script exit
+    main()

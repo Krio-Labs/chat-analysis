@@ -6,25 +6,34 @@ from pathlib import Path
 import sys
 
 # Add project root to Python path
-project_root = Path(__file__).parent.parent
-sys.path.append(str(project_root))
+project_root = str(Path(__file__).parent.parent.parent)
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
+# Use absolute import
+from twitch_chat_analysis.archived import chat_dictionary
 
 # Directory and file setup
-script_dir = Path(__file__).parent.parent
-data_dir = script_dir / 'data'
+script_dir = Path(__file__).parent.parent.parent
+data_dir = script_dir / 'models' / 'dataset'
 dict_dir = script_dir / 'dictionary'
+outputs_dir = script_dir / 'models' / 'dataset'
 
-# Make sure data directory exists
-os.makedirs(data_dir, exist_ok=True)
+# Make sure outputs directory exists
+os.makedirs(outputs_dir, exist_ok=True)
 
-# Define dictionary files
-emote_dict_file = dict_dir / "emote_dictionary.csv"
-emoji_dict_file = dict_dir / "emoji_dictionary.csv"
-slang_dict_file = dict_dir / "slang_dictionary.csv"
+# Run the dictionary creation
+try:
+    chat_dictionary.create_dictionaries()  # Call the function that creates the dictionaries
+except Exception as e:
+    print(f"Error running dictionary creation: {e}")
 
 # File paths
-raw_data_file = data_dir / 'twitch_chat_raw.csv'
-preprocessed_data_file = data_dir / 'twitch_chat_preprocessed.csv'
+raw_data_file = data_dir / 'twitch_chat_sampled_150k.csv'
+preprocessed_data_file = outputs_dir / 'twitch_chat_preprocessed.csv'
+emote_dict_file = dict_dir / 'emote_dictionary.csv'
+emoji_dict_file = dict_dir / 'emoji_dictionary.csv'
+slang_dict_file = dict_dir / 'slang_dictionary.csv'
 
 # Define filtering patterns
 NUMERIC_PATTERN = re.compile(r'^\d+$')
@@ -77,35 +86,65 @@ def filters(message_data):
 
     return True
 
-# Load dictionaries from CSV files
-emote_df = pd.read_csv(emote_dict_file)
-emoji_df = pd.read_csv(emoji_dict_file)
-slang_df = pd.read_csv(slang_dict_file)
-
-# Convert dictionaries to usable format
-emote_dict = pd.Series(emote_df['meaning'].values, index=emote_df['emote']).to_dict()
-emoji_dict = pd.Series(emoji_df['meaning'].values, index=emoji_df['emoji']).to_dict()
-slang_dict = pd.Series(slang_df['meaning'].values, index=slang_df['slang']).to_dict()
-
-# Define a function to preprocess messages to handle Twitch slang, emotes, emojis, and sarcasm
-def preprocess_message(message):
-    """Preprocess Twitch chat messages to handle slang, emotes, emojis, and expressions.
-    
-    Args:
-        message: The message to preprocess
+def load_dictionaries():
+    """Load and validate all dictionaries."""
+    try:
+        # Load dictionaries from CSV files
+        emote_df = pd.read_csv(emote_dict_file)
+        emoji_df = pd.read_csv(emoji_dict_file)
+        slang_df = pd.read_csv(slang_dict_file)
         
-    Returns:
-        str: The preprocessed message
-    """
-    # Handle non-string messages
+        # Convert to usable format with error checking
+        dictionaries = {
+            'emote': pd.Series(emote_df['meaning'].values, index=emote_df['emote']).to_dict(),
+            'emoji': pd.Series(emoji_df['meaning'].values, index=emoji_df['emoji']).to_dict(),
+            'slang': pd.Series(slang_df['meaning'].values, index=slang_df['slang']).to_dict()
+        }
+        
+        print("Successfully loaded all dictionaries")
+        return dictionaries
+        
+    except FileNotFoundError as e:
+        print(f"Dictionary file not found: {e}")
+        return None
+    except Exception as e:
+        print(f"Error loading dictionaries: {e}")
+        return None
+
+def apply_dictionaries(message, dictionaries):
+    """Apply dictionary replacements to a message."""
+    try:
+        if not isinstance(message, str):
+            return ""
+            
+        # Replace emotes with word boundaries
+        for emote, meaning in dictionaries['emote'].items():
+            message = re.sub(rf'\b{re.escape(emote)}\b', meaning, message, flags=re.IGNORECASE)
+            
+        # Replace emojis (direct replacement)
+        for emoji, meaning in dictionaries['emoji'].items():
+            message = message.replace(emoji, meaning)
+            
+        # Replace slang with word boundaries
+        for slang, meaning in dictionaries['slang'].items():
+            message = re.sub(rf'\b{re.escape(slang)}\b', meaning, message, flags=re.IGNORECASE)
+            
+        return message.strip()
+        
+    except Exception as e:
+        print(f"Error applying dictionaries: {e}")
+        return message
+
+def preprocess_message(message, dictionaries=None):
+    """Preprocess Twitch chat messages with optional dictionary replacement."""
     if not isinstance(message, str):
         return ""
         
-    # Normalize excessive whitespace
+    # Normalize whitespace
     message = re.sub(r'\s+', ' ', message).strip()
     
     try:
-        # Handle repeated patterns with intensity markers
+        # Apply pattern replacements (keep existing patterns code)
         patterns = [
             # Win celebrations - only match standalone W's
             (r'\b(W)\b', "Yes!"),  # Single W
@@ -144,25 +183,10 @@ def preprocess_message(message):
             except re.error as e:
                 print(f"Regex error with pattern {pattern}: {e}")
                 continue
-                
-        # Replace emotes, emojis and slang using dictionaries
-        try:
-            for emote, meaning in emote_dict.items():
-                message = re.sub(rf'\b{re.escape(emote)}\b', meaning, message, flags=re.IGNORECASE)
-        except Exception as e:
-            print(f"Error processing emotes: {e}")
-            
-        try:
-            for emoji, meaning in emoji_dict.items():
-                message = message.replace(emoji, meaning)
-        except Exception as e:
-            print(f"Error processing emojis: {e}")
-            
-        try:
-            for slang, meaning in slang_dict.items():
-                message = re.sub(rf'\b{re.escape(slang)}\b', meaning, message, flags=re.IGNORECASE)
-        except Exception as e:
-            print(f"Error processing slang: {e}")
+        
+        # Apply dictionary replacements if dictionaries are provided
+        if dictionaries:
+            message = apply_dictionaries(message, dictionaries)
             
         # Handle excessive repetition
         message = re.sub(r'(\S)\1{20,}', 
@@ -173,11 +197,14 @@ def preprocess_message(message):
         
     except Exception as e:
         print(f"Error preprocessing message: {e}")
-        return message  # Return original message if processing fails
+        return message
 
 def process_chat_data():
     """Process the chat data with improved error handling and filtering."""
     try:
+        # Load dictionaries first
+        dictionaries = load_dictionaries()
+        
         # Load data
         df = pd.read_csv(raw_data_file)
         print(f"Initial row count: {len(df)}")
@@ -205,13 +232,15 @@ def process_chat_data():
                     group.iloc[i, group.columns.get_loc('is_duplicate')] = True
             return group
 
-        # Update the groupby operation to explicitly select columns
-        filtered_df = filtered_df.groupby('username')[filtered_df.columns].apply(remove_recent_duplicates)
+        # Group by username and apply duplicate removal
+        filtered_df = filtered_df.groupby('username', group_keys=False).apply(remove_recent_duplicates)
         filtered_df = filtered_df[~filtered_df['is_duplicate']].drop(['message_lower', 'is_duplicate'], axis=1)
         print(f"Row count after removing recent duplicates: {len(filtered_df)}")
         
-        # Preprocess messages
-        filtered_df['message'] = filtered_df['message'].apply(preprocess_message)
+        # Preprocess messages with dictionaries
+        filtered_df['message'] = filtered_df['message'].apply(
+            lambda x: preprocess_message(x, dictionaries)
+        )
         print(f"Final row count: {len(filtered_df)}")
         
         # Save processed data
