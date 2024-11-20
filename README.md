@@ -29,5 +29,10 @@ This project provides a pipeline for analyzing Twitch chat data through four mai
 
 ## Requirements
 
+Create a config.py file with the following variables:
+- TWITCH_CLIENT_ID
+- TWITCH_CLIENT_SECRET
+- GEMINI_API_KEY
+
 ```bash
 pip install -r requirements.txt

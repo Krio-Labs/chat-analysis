@@ -3,9 +3,8 @@ pandas
 numpy
 
 # Machine Learning and NLP
+scikit-learn
 transformers
-torch
-vaderSentiment
 nltk
 
 # Visualization
@@ -22,3 +21,5 @@ chat-downloader
 # Emoji handling
 emoji==0.6.0
 
+# Google Generative AI
+google-generativeai

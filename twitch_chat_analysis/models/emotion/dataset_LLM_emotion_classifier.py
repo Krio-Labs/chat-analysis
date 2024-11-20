@@ -6,7 +6,7 @@ from tqdm import tqdm
 import json
 from typing import List
 from multiprocessing import Pool, cpu_count
-import google.generativeai as genai  # Change this import
+import google.generativeai as genai
 
 # Add parent directory to path to import config
 sys.path.append(str(Path(__file__).parent.parent.parent))
