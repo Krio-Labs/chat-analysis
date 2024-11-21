@@ -34,5 +34,8 @@ Create a config.py file with the following variables:
 - TWITCH_CLIENT_SECRET
 - GEMINI_API_KEY
 
+Create a new environment and install the requirements:clea
 ```bash
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
