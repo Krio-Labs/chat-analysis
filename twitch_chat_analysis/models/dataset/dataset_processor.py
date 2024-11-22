@@ -10,7 +10,7 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 # Use absolute import
-from twitch_chat_analysis.archived import chat_dictionary
+from twitch_chat_analysis.dictionary import chat_dictionary
 
 # Directory and file setup
 script_dir = Path(__file__).parent.parent.parent

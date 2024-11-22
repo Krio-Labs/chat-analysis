@@ -23,9 +23,9 @@ emotion_clusters = {
 def load_models():
     """Load both emotion and highlight classifier models."""
     try:
-        with open('twitch_chat_analysis/models/emotion/emotion_classifier_pipe_lr.pkl', 'rb') as f:
+        with open('twitch_chat_analysis/models/emotion_classifier_pipe_lr.pkl', 'rb') as f:
             emotion_model = pickle.load(f)
-        with open('twitch_chat_analysis/models/highlightable/highlight_classifier_pipe_lr.pkl', 'rb') as f:
+        with open('twitch_chat_analysis/models/highlight_classifier_pipe_lr.pkl', 'rb') as f:
             highlight_model = pickle.load(f)
         return emotion_model, highlight_model
     except Exception as e:
